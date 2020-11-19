@@ -1,0 +1,30 @@
+version: "3"
+services:
+  vpn:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - LOCAL_NETWORK=192.168.1.0/24
+      - PIA_USER=**USERNAME**
+      - PIA_PASS=**PASSWORD**
+      - PIA_DNS=true
+      - PORT_FORWARDING=true
+      - FIREWALL=true
+      - WG_USERSPACE=true
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv6.conf.default.disable_ipv6=1
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.lo.disable_ipv6=1
+    # The container has no recovery logic. Use a healthcheck to catch disconnects.
+    healthcheck:
+      test: ping -c 1 www.google.com || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3

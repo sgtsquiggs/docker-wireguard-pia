@@ -1,0 +1,139 @@
+#!/bin/bash
+# Copyright (C) 2020 Private Internet Access, Inc.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+
+port_file=/shared/port
+
+# Handle shutdown behavior
+finish () {
+  echo "Removing port file... $port_file"
+  [ -w "$port_file" ] && rm "$port_file"
+  wg-quick down wg0
+  exit 0
+}
+
+trap finish SIGTERM SIGINT SIGQUIT
+
+# Check if the mandatory environment variables are set.
+if [[ ! $PF_GATEWAY ]]; then
+  echo "PF_GATEWAY was not set!"
+  exit 1
+elif [[ ! $PIA_TOKEN ]]; then
+  echo "PIA_TOKEN was not set!"
+  exit 1
+elif [[ ! $PF_HOSTNAME ]]; then
+  echo "PF_HOSTNAME was not set!"
+  exit 1
+fi
+
+# The port forwarding system has required two variables:
+# PAYLOAD: contains the token, the port and the expiration date
+# SIGNATURE: certifies the payload originates from the PIA network.
+
+# Basically PAYLOAD+SIGNATURE=PORT. You can use the same PORT on all servers.
+# The system has been designed to be completely decentralized, so that your
+# privacy is protected even if you want to host services on your systems.
+
+# You can get your PAYLOAD+SIGNATURE with a simple curl request to any VPN
+# gateway, no matter what protocol you are using. Considering WireGuard has
+# already been automated in this repo, here is a command to help you get
+# your gateway if you have an active OpenVPN connection:
+# $ ip route | head -1 | grep tun | awk '{ print $3 }'
+# This section will get updated as soon as we created the OpenVPN script.
+
+# Get the payload and the signature from the PF API. This will grant you
+# access to a random port, which you can activate on any server you connect to.
+# If you already have a signature, and you would like to re-use that port,
+# save the payload_and_signature received from your previous request
+# in the env var PAYLOAD_AND_SIGNATURE, and that will be used instead.
+echo "Getting new signature..."
+payload_and_signature="$(curl -s -m 5 \
+--connect-to "$PF_HOSTNAME::$PF_GATEWAY:" \
+--cacert "/etc/wireguard/ca.rsa.4096.crt" \
+-G --data-urlencode "token=${PIA_TOKEN}" \
+"https://${PF_HOSTNAME}:19999/getSignature")"
+export payload_and_signature
+
+# Check if the payload and the signature are OK.
+# If they are not OK, just stop the script.
+if [ "$(echo "$payload_and_signature" | jq -r '.status')" != "OK" ]; then
+  echo "The payload_and_signature variable does not contain an OK status."
+  exit 1
+fi
+
+# We need to get the signature out of the previous response.
+# The signature will allow the us to bind the port on the server.
+signature="$(echo "$payload_and_signature" | jq -r '.signature')"
+
+# The payload has a base64 format. We need to extract it from the
+# previous response and also get the following information out:
+# - port: This is the port you got access to
+# - expires_at: this is the date+time when the port expires
+payload="$(echo "$payload_and_signature" | jq -r '.payload')"
+port="$(echo "$payload" | base64 -d | jq -r '.port')"
+
+# The port normally expires after 2 months. If you consider
+# 2 months is not enough for your setup, please open a ticket.
+expires_at="$(echo "$payload" | base64 -d | jq -r '.expires_at')"
+
+mkdir -p "$(dirname $port_file)"
+rm -rf $port_file
+echo "Creating port file... $port_file"
+echo "$port" > $port_file
+
+# Display some information on the screen for the user.
+echo "The signature is OK.
+
+--> The port is $port and it will expire on $expires_at. <--
+
+"
+
+if [ "$FIREWALL" == "true" ]; then
+  iptables -A INPUT -p tcp -i wg0 --dport "$port" -j ACCEPT
+  iptables -A INPUT -p udp -i wg0 --dport "$port" -j ACCEPT
+  echo "Allowing incoming traffic on port $1"
+fi
+
+# Now we have all required data to create a request to bind the port.
+# We will repeat this request every 15 minutes, in order to keep the port
+# alive. The servers have no mechanism to track your activity, so they
+# will just delete the port forwarding if you don't send keepalives.
+while true; do
+  bind_port_response="$(curl -Gs -m 5 \
+    --connect-to "$PF_HOSTNAME::$PF_GATEWAY:" \
+    --cacert "/etc/wireguard/ca.rsa.4096.crt" \
+    --data-urlencode "payload=${payload}" \
+    --data-urlencode "signature=${signature}" \
+    "https://${PF_HOSTNAME}:19999/bindPort")"
+
+    # If port did not bind, just exit the script.
+    # This script will exit in 2 months, since the port will expire.
+    export bind_port_response
+    if [ "$(echo "$bind_port_response" | jq -r '.status')" != "OK" ]; then
+      echo "The API did not return OK when trying to bind port. Exiting."
+      exit 1
+    fi
+    echo Port $port refreshed on $(date). \
+      This port will expire on $(date --date="$expires_at")
+
+    # sleep 15 minutes
+    sleep 900
+done

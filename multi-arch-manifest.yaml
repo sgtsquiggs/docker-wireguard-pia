@@ -1,0 +1,16 @@
+image: sgtsquiggs/wireguard-pia:latest
+manifests:
+  - image: sgtsquiggs/wireguard-pia:amd64-latest
+    platform:
+      architecture: amd64
+      os: linux
+  - image: sgtsquiggs/wireguard-pia:arm32v7-latest
+    platform:
+      architecture: arm
+      os: linux
+      variant: v7
+  - image: sgtsquiggs/wireguard-pia:arm64v8-latest
+    platform:
+      architecture: arm64
+      os: linux
+      variant: v8
